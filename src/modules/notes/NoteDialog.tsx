@@ -1,3 +1,4 @@
+import { Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "../../shared/ui/Button";
 import { Dialog } from "../../shared/ui/Dialog";
@@ -9,6 +10,7 @@ export const NoteDialog = () => {
   const selectedNoteId = useNotesStore((s) => s.selectedNoteId);
   const selectNote = useNotesStore((s) => s.selectNote);
   const updateNoteText = useNotesStore((s) => s.updateNoteText);
+  const deleteNote = useNotesStore((s) => s.deleteNote);
 
   const note = useMemo(() => {
     if (!selectedNoteId) return null;
@@ -18,7 +20,7 @@ export const NoteDialog = () => {
   const [value, setValue] = useState("");
 
   useEffect(() => {
-    setValue(note?.text ?? "");
+    setValue(note?.convertedText?.trim() || note?.dictatedText?.trim() || note?.text || "");
   }, [note?.id]);
 
   const open = selectedNoteId != null;
@@ -48,6 +50,19 @@ export const NoteDialog = () => {
       <div className="p-6 border-t border-border flex flex-col sm:flex-row gap-3">
         <Button variant="outline" onClick={() => selectNote(null)} className="sm:flex-1">
           Закрыть
+        </Button>
+        <Button
+          variant="outline"
+          onClick={() => {
+            if (!note) return;
+            deleteNote(note.id);
+            selectNote(null);
+          }}
+          className="sm:flex-1"
+          disabled={!note}
+        >
+          <Trash2 className="size-4 mr-2" />
+          Удалить
         </Button>
         <Button
           onClick={() => {

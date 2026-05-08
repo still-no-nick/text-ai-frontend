@@ -1,6 +1,7 @@
 import { create } from "zustand";
-import type { DictationStatus } from "./voice-dictation.types";
-import { useNotesStore } from "../notes/notes.store";
+import type { DictationStatus, TransformKind } from "./voice-dictation.types";
+import { createSttTranscription, getSttTranscription, postProcessText } from "../../shared/lib/api";
+import { startWavRecording, stopWavRecording } from "./wavRecorder";
 
 type VoiceDictationState = {
   status: DictationStatus;
@@ -8,11 +9,21 @@ type VoiceDictationState = {
   interimText: string;
   finalText: string;
   currentText: string;
+  dictatedText: string;
+  dictatedDirty: boolean;
+  convertedText: string;
+  transformKind: TransformKind;
+  recording: { blob: Blob; sampleRate: number; durationMs: number } | null;
   error: string | null;
   startNew: () => void;
   pause: () => void;
   resume: () => void;
-  stop: () => void;
+  stop: () => Promise<void>;
+  reset: () => void;
+  setDictatedText: (text: string) => void;
+  setConvertedText: (text: string) => void;
+  setTransformKind: (kind: TransformKind) => void;
+  convertText: () => Promise<void>;
 };
 
 let recognition: SpeechRecognition | null = null;
@@ -21,6 +32,8 @@ let analyser: AnalyserNode | null = null;
 let animationFrame: number | null = null;
 let stream: MediaStream | null = null;
 let committed = "";
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 const stopLevelMeter = (set: (partial: Partial<VoiceDictationState>) => void) => {
   if (animationFrame) {
@@ -56,7 +69,8 @@ const ensureAudio = async () => {
 
 const createRecognition = (
   set: (partial: Partial<VoiceDictationState>) => void,
-  getStatus: () => DictationStatus
+  getStatus: () => DictationStatus,
+  getDictated: () => { dictatedDirty: boolean; dictatedText: string }
 ) => {
   const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognitionAPI) {
@@ -83,16 +97,19 @@ const createRecognition = (
     const committedTrimmed = committed.trim();
     const currentText = (committedTrimmed + (interim ? ` ${interim}` : "")).trim();
 
+    const { dictatedDirty, dictatedText } = getDictated();
     set({
       interimText: interim,
       finalText: committedTrimmed,
       currentText,
+      dictatedText: dictatedDirty ? dictatedText : currentText,
     });
-
-    useNotesStore.getState().setDraft(currentText);
   };
 
-  r.onerror = () => {
+  r.onerror = (event: any) => {
+    // When we call abort()/stop() programmatically, Chrome may emit "aborted".
+    // It's not a real failure from the user's perspective.
+    if ((event as any)?.error === "aborted") return;
     stopLevelMeter(set);
     set({ status: "error", error: "Ошибка распознавания речи" });
   };
@@ -114,12 +131,25 @@ export const useVoiceDictation = create<VoiceDictationState>((set, get) => ({
   interimText: "",
   finalText: "",
   currentText: "",
+  dictatedText: "",
+  dictatedDirty: false,
+  convertedText: "",
+  transformKind: "beautify",
+  recording: null,
   error: null,
 
   startNew: () => {
     committed = "";
-    set({ interimText: "", finalText: "", currentText: "", error: null });
-    useNotesStore.getState().setDraft("");
+    set({
+      interimText: "",
+      finalText: "",
+      currentText: "",
+      dictatedText: "",
+      dictatedDirty: false,
+      convertedText: "",
+      recording: null,
+      error: null,
+    });
     void get().resume();
   },
 
@@ -138,8 +168,12 @@ export const useVoiceDictation = create<VoiceDictationState>((set, get) => ({
       set({ status: "requesting", error: null });
       await ensureAudio();
       startLevelMeter(set);
-      recognition = createRecognition(set, () => get().status);
+      recognition = createRecognition(set, () => get().status, () => ({
+        dictatedDirty: get().dictatedDirty,
+        dictatedText: get().dictatedText,
+      }));
       recognition.start();
+      await startWavRecording();
       set({ status: "recording" });
     } catch (err) {
       stopLevelMeter(set);
@@ -150,7 +184,7 @@ export const useVoiceDictation = create<VoiceDictationState>((set, get) => ({
     }
   },
 
-  stop: () => {
+  stop: async () => {
     if (recognition) {
       recognition.abort();
       recognition = null;
@@ -169,6 +203,130 @@ export const useVoiceDictation = create<VoiceDictationState>((set, get) => ({
     }
 
     analyser = null;
-    set({ status: "idle", level: 0 });
+
+    const rec = await stopWavRecording();
+    if (!rec) {
+      set({ status: "idle", level: 0 });
+      return;
+    }
+
+    set({ status: "recorded", level: 0, recording: rec, error: null });
+  },
+
+  reset: () => {
+    committed = "";
+    set({
+      status: "idle",
+      level: 0,
+      interimText: "",
+      finalText: "",
+      currentText: "",
+      dictatedText: "",
+      dictatedDirty: false,
+      convertedText: "",
+      recording: null,
+      error: null,
+    });
+  },
+
+  setDictatedText: (text) => {
+    set({ dictatedText: text, dictatedDirty: true });
+  },
+
+  setConvertedText: (text) => {
+    set({ convertedText: text });
+  },
+
+  setTransformKind: (kind) => {
+    set({ transformKind: kind });
+  },
+
+  convertText: async () => {
+    try {
+      // If user clicks "Преобразовать" while recording/paused, finalize WAV first.
+      const before = get();
+      if ((before.status === "recording" || before.status === "paused") && !before.recording) {
+        await before.stop();
+      } else if (before.status === "recording") {
+        before.pause();
+      }
+
+      const s = get();
+
+      // Prefer STT from audio file when available.
+      if (s.recording?.blob) {
+        set({ status: "uploading", error: null });
+        const created = await createSttTranscription({
+          file: s.recording.blob,
+          language: "ru-RU",
+          mode: "auto",
+          postProcess: true,
+          style: "chat",
+          kind: s.transformKind,
+        });
+
+        if (created.status === "failed") {
+          throw new Error(created.error?.message || "STT failed");
+        }
+
+        if (created.status === "done") {
+          const dictated = (created.textRaw ?? "").trim();
+          const converted = (created.text ?? "").trim();
+          set({
+            status: "recorded",
+            dictatedText: dictated,
+            dictatedDirty: false,
+            convertedText: converted,
+            error: null,
+          });
+          return;
+        }
+
+        set({ status: "processing" });
+        const id = created.id;
+
+        for (let attempt = 0; attempt < 60; attempt++) {
+          await sleep(800);
+          const task = await getSttTranscription(id);
+          if (task.status === "processing") continue;
+          if (task.status === "failed") {
+            throw new Error(task.error?.message || "STT failed");
+          }
+
+          const dictated = (task.textRaw ?? "").trim();
+          const converted = (task.text ?? "").trim();
+          set({
+            status: "recorded",
+            dictatedText: dictated,
+            dictatedDirty: false,
+            convertedText: converted,
+            error: null,
+          });
+          return;
+        }
+
+        throw new Error("STT timeout");
+      }
+
+      // Fallback: LLM-only post-process of already dictated text (e.g. WebSpeech API).
+      const text = s.dictatedText.trim();
+      if (!text) return;
+
+      set({ status: "converting", error: null });
+
+      const json = await postProcessText({
+        text,
+        language: "ru",
+        style: "chat",
+        kind: s.transformKind,
+      });
+      const out = typeof json?.text === "string" ? json.text : "";
+      set({ convertedText: out, status: "recorded", error: null });
+    } catch (e) {
+      set({
+        status: "error",
+        error: e instanceof Error ? e.message : "Ошибка бэкенда",
+      });
+    }
   },
 }));

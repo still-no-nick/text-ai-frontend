@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import { cn } from "../../shared/lib/cn";
 import { IconButton } from "../../shared/ui/IconButton";
 import { useNotesStore } from "./notes.store";
+import type { Note } from "./notes.types";
 import { DictationFab } from "../voice-dictation/DictationFab";
 import { DictationDialog } from "../voice-dictation/DictationDialog";
 import { NoteDialog } from "./NoteDialog";
@@ -17,6 +18,8 @@ const snippet = (text: string) => {
   return normalized.length > 60 ? normalized.slice(0, 60) + "…" : normalized;
 };
 
+const noteMainText = (n: Note) => n.convertedText?.trim() || n.dictatedText?.trim() || n.text;
+
 export const NotesPage = () => {
   const notes = useNotesStore((s) => s.notes);
   const query = useNotesStore((s) => s.query);
@@ -26,7 +29,12 @@ export const NotesPage = () => {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return notes;
-    return notes.filter((n) => n.text.toLowerCase().includes(q));
+    return notes.filter((n) => {
+      const main = noteMainText(n).toLowerCase();
+      const dictated = (n.dictatedText || "").toLowerCase();
+      const converted = (n.convertedText || "").toLowerCase();
+      return main.includes(q) || dictated.includes(q) || converted.includes(q);
+    });
   }, [notes, query]);
 
   const onCopy = async (text: string) => {
@@ -130,13 +138,13 @@ export const NotesPage = () => {
                     }}
                   >
                     <div className="text-sm text-muted-foreground">{formatTime(n.createdAt)}</div>
-                    <div className="text-sm">{snippet(n.text)}</div>
+                    <div className="text-sm">{snippet(noteMainText(n))}</div>
                     <div className="flex items-center justify-end gap-1">
                       <IconButton
                         size="sm"
                         onClick={(e) => {
                           e.stopPropagation();
-                          void onCopy(n.text);
+                          void onCopy(noteMainText(n));
                         }}
                         title="Copy"
                       >
