@@ -160,11 +160,22 @@ export const useVoiceDictation = create<VoiceDictationState>((set, get) => ({
       recognition = null;
     }
     stopLevelMeter(set);
+    void stopWavRecording();
+    if (stream) {
+      stream.getTracks().forEach((t) => t.stop());
+      stream = null;
+    }
+    if (audioContext) {
+      void audioContext.close();
+      audioContext = null;
+    }
+    analyser = null;
     set({ status: "paused" });
   },
 
   resume: async () => {
     try {
+      if (get().status === "recording") return;
       set({ status: "requesting", error: null });
       await ensureAudio();
       startLevelMeter(set);
@@ -185,6 +196,7 @@ export const useVoiceDictation = create<VoiceDictationState>((set, get) => ({
   },
 
   stop: async () => {
+    if (get().status === "idle") return;
     if (recognition) {
       recognition.abort();
       recognition = null;

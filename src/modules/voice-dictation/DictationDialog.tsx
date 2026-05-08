@@ -1,4 +1,4 @@
-import { Mic, Pause, Save, X, Wand2 } from "lucide-react";
+import { Mic, Save, X, Wand2 } from "lucide-react";
 import { useEffect } from "react";
 import { Button } from "../../shared/ui/Button";
 import { Dialog } from "../../shared/ui/Dialog";
@@ -21,8 +21,6 @@ export const DictationDialog = () => {
     level,
     error,
     startNew,
-    pause,
-    resume,
     stop,
     reset,
     dictatedText,
@@ -38,6 +36,16 @@ export const DictationDialog = () => {
     if (isOpen && status === "idle") {
       startNew();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, status]);
+
+  useEffect(() => {
+    if (isOpen) return;
+    if (status === "idle") return;
+    void (async () => {
+      await stop();
+      reset();
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, status]);
 
@@ -77,6 +85,7 @@ export const DictationDialog = () => {
   const isProcessing = status === "processing";
   const isBusy = status === "requesting" || isConverting || isUploading || isProcessing;
   const canConvert = !!dictatedText.trim() || status === "recorded";
+  const canStop = status === "requesting" || status === "recording" || status === "paused";
 
   return (
     <Dialog
@@ -88,7 +97,7 @@ export const DictationDialog = () => {
         <div className="flex flex-col gap-1">
           <h2 className="text-xl font-semibold">Запись заметки</h2>
           <p className="text-sm text-muted-foreground">
-            Нажмите на активный микрофон, чтобы поставить на паузу.
+            Нажмите на активный микрофон, чтобы остановить запись.
           </p>
         </div>
         <div className="flex items-center gap-4">
@@ -137,11 +146,15 @@ export const DictationDialog = () => {
               "bg-primary text-primary-foreground",
               isRecording && "animate-pulse ring-4 ring-primary/30"
             )}
-            onClick={isRecording ? pause : resume}
-            disabled={status === "requesting" || status === "error" || isBusy}
-            title={isRecording ? "Пауза" : "Продолжить"}
+            onClick={() => {
+              void (async () => {
+                if (canStop) await stop();
+              })();
+            }}
+            disabled={status === "error" || isBusy || (!canStop && status !== "idle")}
+            title={canStop ? "Стоп" : "Запись запускается автоматически"}
           >
-            {isRecording ? <Pause className="size-10" /> : <Mic className="size-10" />}
+            <Mic className="size-10" />
           </button>
 
           <VoiceLevelBars level={level} />
